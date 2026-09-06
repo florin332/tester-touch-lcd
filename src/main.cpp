@@ -126,7 +126,7 @@ void setup() {
     SPI.setTX(TFT_MOSI); SPI.setSCK(TFT_SCK); SPI.setRX(TOUCH_MISO); SPI.begin();
     SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0)); SPI.endTransaction();
     display.begin(); display.invertDisplay(INVERT_COLORS); display.setRotation(0);
-    pinMode(TOUCH_IRQ, INPUT_PULLUP); touch.begin(SPI); touch.setRotation(0); delay(50);
+    pinMode(TOUCH_IRQ, INPUT_PULLUP); touch.begin(); touch.setRotation(0); delay(50);
     
     // CRITIC: Curățarea forțată (Flush) a bufferului tactil rezidual înainte de a evalua stadiul
     for (int i = 0; i < 5; i++) { getIsolatedTouchPoint(); delay(20); }
