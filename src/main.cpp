@@ -2,8 +2,9 @@
 #include <SPI.h>
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_ILI9341.h>
-#include <XPT2046_Touchscreen.h>
+#include <Adafruit_st7735.h>
+#include <circuitstate/CSE_CST328.h
+>
 
 // ============================================================
 // Prototipuri de funcții
