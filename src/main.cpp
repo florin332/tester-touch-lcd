@@ -32,16 +32,17 @@ void renderCalibPointScreen(int idx);
 // ============================================================
 #define INVERT_COLORS true
 
-#define TFT_CS     22
-#define TFT_RST    20
-#define TFT_DC     21
-#define TFT_MOSI   19
+#define TFT_CS     13
+#define TFT_RST    14
+#define TFT_DC     6
+#define TFT_MOSI   11
 #define TFT_LED     4
-#define TFT_SCK    18
+#define TFT_SCK    10
+#define TFT_MISO 12
 
-#define TOUCH_CS   26
-#define TOUCH_MISO 16
-#define TOUCH_IRQ  27
+#define TOUCH_CS   9
+#define TOUCH_MISO 12
+#define TOUCH_IRQ  8
 
 #define RECALIB_BUTTON 5
 
@@ -100,7 +101,7 @@ bool lastValid = false;
 
 bool armRecalib = false;
 
-Adafruit_ILI9341 display((int8_t)TFT_CS, (int8_t)TFT_DC, (int8_t)TFT_RST);
+Adafruit_ILI9341 display(&SPI1, (int8_t)TFT_DC, (int8_t)TFT_CS, (int8_t)TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
 
 // ============================================================
@@ -266,7 +267,7 @@ void renderPageInfo() {
     display.setCursor(10, 12);
     display.setTextColor(ILI9341_CYAN);
     display.setTextSize(2);
-    display.println("TESTER LCD SPI");
+    display.println("TESTER LCD SPI1");
 
     display.setTextSize(1);
     display.setTextColor(ILI9341_YELLOW);
@@ -490,20 +491,20 @@ void setup() {
     pinMode(TFT_LED, OUTPUT);
     digitalWrite(TFT_LED, HIGH);
 
-    SPI.setTX(TFT_MOSI);
-    SPI.setSCK(TFT_SCK);
-    SPI.setRX(TOUCH_MISO);
-    SPI.begin();
+    SPI1.setTX(TFT_MOSI);
+    SPI1.setSCK(TFT_SCK);
+    SPI1.setRX(TFT_MISO);
+    SPI1.begin();
 
-    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-    SPI.endTransaction();
+    SPI1.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    SPI1.endTransaction();
 
     display.begin();
     display.invertDisplay(INVERT_COLORS);
     display.setRotation(0);
 
     pinMode(TOUCH_IRQ, INPUT_PULLUP);
-    touch.begin();
+    touch.begin(SPI1);
     touch.setRotation(0);
     delay(50);
 
