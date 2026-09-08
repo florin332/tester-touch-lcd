@@ -1,14 +1,28 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <EEPROM.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ILI9341.h>
-#include <XPT2046_Touchscreen.h>
+#include <LcdConfig.h>   // HAL: selectare model + API comun
+
+// Culori generice RGB565 (independente de controller)
+#define HAL_COLOR_BLACK      0x0000
+#define HAL_COLOR_WHITE      0xFFFF
+#define HAL_COLOR_RED        0xF800
+#define HAL_COLOR_GREEN      0x07E0
+#define HAL_COLOR_BLUE       0x001F
+#define HAL_COLOR_CYAN       0x07FF
+#define HAL_COLOR_YELLOW     0xFFE0
+#define HAL_COLOR_ORANGE     0xFD20
+#define HAL_COLOR_MAROON     0x7800
+#define HAL_COLOR_DARKGREEN  0x03E0
+#define HAL_COLOR_DARKGREY   0x7BEF
+
+// Dimensiunile display-ului activ (din HAL)
+#define TFT_W (LCD.width)
+#define TFT_H (LCD.height)
 
 // ============================================================
 // Prototipuri de funcții
 // ============================================================
-TS_Point getIsolatedTouchPoint();
 int safeMap(int v, int fl, int fh, int tl, int th);
 void loadCalib();
 bool saveCalib();
@@ -28,26 +42,16 @@ void renderCalibPointScreen(int idx);
 // ============================================================
 // Definiții hardware și constante
 // ============================================================
-#define INVERT_COLORS true
-
-#define TFT_CS     13
-#define TFT_RST    14
-#define TFT_DC     6
-#define TFT_MOSI   11
-#define TFT_LED     4
-#define TFT_SCK    10
-#define TFT_MISO 12
-
-#define TOUCH_CS   9
-#define TOUCH_MISO 12
-#define TOUCH_IRQ  8
+// Pinii display/touch sunt acum in HAL (LcdModel*.cpp, structura LCD)
 
 #define RECALIB_BUTTON 5
 
-#define Z_TOUCH_MIN   200
-#define Z_SAMPLE_MIN  300
+#define Z_TOUCH_MIN   (LCD.zTouchMin)
+#define Z_SAMPLE_MIN  (LCD.zSampleMin)
 
-#define CALIB_MAGIC 0x544C4344
+// Magic-ul de calibrare este per model (din HAL): la schimbarea
+// modelului de display se declanseaza automat recalibrarea
+#define CALIB_MAGIC (LCD.calibMagic)
 #define CALIB_VER   6
 
 // ============================================================
@@ -109,22 +113,11 @@ int32_t swipeStartX[2], swipeStartY[2];
 int32_t swipeEndX[2], swipeEndY[2];
 int swipeCount = 0;
 
-Adafruit_ILI9341 display(&SPI1, (int8_t)TFT_DC, (int8_t)TFT_CS, (int8_t)TFT_RST);
-XPT2046_Touchscreen touch(TOUCH_CS);
+// Instanta display este expusa de HAL ca referinta Adafruit_GFX &display
 
 // ============================================================
 // Funcții de bază pentru touch și mapare
 // ============================================================
-TS_Point getIsolatedTouchPoint() {
-    digitalWrite(TFT_CS, HIGH);
-    digitalWrite(TOUCH_CS, LOW);
-
-    TS_Point p = touch.getPoint();
-
-    digitalWrite(TOUCH_CS, HIGH);
-    return p;
-}
-
 int safeMap(int v, int fl, int fh, int tl, int th) {
     if (fh == fl) {
         return tl;  // Protecție la diviziune cu zero (calibrare coruptă)
@@ -138,10 +131,10 @@ void loadCalib() {
 
     if (calib.magic != CALIB_MAGIC || calib.version != CALIB_VER) {
         calib.magic   = 0;
-        calib.xmin    = 3700;
-        calib.xmax    = 370;
-        calib.ymin    = 300;
-        calib.ymax    = 3700;
+        calib.xmin    = LCD.defXmin;
+        calib.xmax    = LCD.defXmax;
+        calib.ymin    = LCD.defYmin;
+        calib.ymax    = LCD.defYmax;
         calib.swapXY  = 0;
         calib.invX    = 0;
         calib.invY    = 0;
@@ -184,15 +177,15 @@ void mapTouch(int32_t rx, int32_t ry, int &ox, int &oy) {
     int32_t cx, cy;
     processRawTouch(rx, ry, cx, cy, true);
 
-    ox = constrain(safeMap(cx, calib.xmin, calib.xmax, 0, 239), 0, 239);
-    oy = constrain(safeMap(cy, calib.ymin, calib.ymax, 0, 319), 0, 319);
+    ox = constrain(safeMap(cx, calib.xmin, calib.xmax, 0, TFT_W - 1), 0, TFT_W - 1);
+    oy = constrain(safeMap(cy, calib.ymin, calib.ymax, 0, TFT_H - 1), 0, TFT_H - 1);
 }
 
 // ============================================================
 // Funcții de desenare
 // ============================================================
 void drawButton(int x, int y, int w, int h, const char *l, uint16_t fg, uint16_t bg) {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
     display.fillRoundRect(x, y, w, h, 4, bg);
     display.drawRoundRect(x, y, w, h, 4, fg);
@@ -202,11 +195,11 @@ void drawButton(int x, int y, int w, int h, const char *l, uint16_t fg, uint16_t
     display.setTextSize(2);
     display.print(l);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 }
 
 void drawCrosshair(int cx, int cy, uint16_t clr) {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
     display.drawCircle(cx, cy, 10, clr);
     display.drawLine(cx - 16, cy, cx - 6, cy, clr);
@@ -215,38 +208,41 @@ void drawCrosshair(int cx, int cy, uint16_t clr) {
     display.drawLine(cx, cy + 6, cx, cy + 16, clr);
     display.fillCircle(cx, cy, 2, clr);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 }
 
 // ============================================================
 // Funcții de randare a paginilor
 // ============================================================
 void renderPageInfo() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
+    display.fillScreen(HAL_COLOR_BLACK);
 
     display.setCursor(10, 12);
-    display.setTextColor(ILI9341_CYAN);
+    display.setTextColor(HAL_COLOR_CYAN);
     display.setTextSize(2);
-    display.println("TESTER LCD SPI1");
+    display.println("TESTER LCD");
 
     display.setTextSize(1);
-    display.setTextColor(ILI9341_YELLOW);
+    display.setTextColor(HAL_COLOR_YELLOW);
 
-    display.setCursor(10, 40);
+    display.setCursor(10, 32);
+    display.print(LCD.name);
+
+    display.setCursor(10, 48);
     display.print("Xmin=");
     display.print(calib.xmin);
     display.print(" Xmax=");
     display.print(calib.xmax);
 
-    display.setCursor(10, 52);
+    display.setCursor(10, 60);
     display.print("Ymin=");
     display.print(calib.ymin);
     display.print(" Ymax=");
     display.print(calib.ymax);
 
-    display.setCursor(10, 64);
+    display.setCursor(10, 72);
     display.print("SwapXY=");
     display.print(calib.swapXY);
     display.print(" InvX=");
@@ -254,44 +250,44 @@ void renderPageInfo() {
     display.print(" InvY=");
     display.print(calib.invY);
 
-    display.setCursor(10, 76);
-    display.setTextColor(ILI9341_GREEN);
+    display.setCursor(10, 84);
+    display.setTextColor(HAL_COLOR_GREEN);
     display.print("Status Touch: CALIBRAT COMPLET");
 
-    display.drawFastHLine(0, 280, 240, ILI9341_DARKGREY);
+    display.drawFastHLine(0, 280, TFT_W, HAL_COLOR_DARKGREY);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 
-    drawButton(10, 100, 105, 45, "DESEN", ILI9341_WHITE, 0x001F);
-    drawButton(125, 100, 105, 45, "RGB", ILI9341_WHITE, 0x7800);
-    drawButton(10, 160, 105, 45, "RAW", ILI9341_WHITE, 0x03E0);
-    drawButton(125, 160, 105, 45, "Calibr.", ILI9341_RED, ILI9341_YELLOW);
+    drawButton(10, 100, 105, 45, "DESEN", HAL_COLOR_WHITE, 0x001F);
+    drawButton(125, 100, 105, 45, "RGB", HAL_COLOR_WHITE, 0x7800);
+    drawButton(10, 160, 105, 45, "RAW", HAL_COLOR_WHITE, 0x03E0);
+    drawButton(125, 160, 105, 45, "Calibr.", HAL_COLOR_RED, HAL_COLOR_YELLOW);
 }
 
 void renderPageDesen() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
-    display.drawFastHLine(0, 55, 240, ILI9341_DARKGREY);
-    display.drawFastHLine(0, 292, 240, ILI9341_DARKGREY);
+    display.fillScreen(HAL_COLOR_BLACK);
+    display.drawFastHLine(0, 55, TFT_W, HAL_COLOR_DARKGREY);
+    display.drawFastHLine(0, 292, TFT_W, HAL_COLOR_DARKGREY);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 
-    drawButton(10, 10, 90, 35, "INAPOI", ILI9341_WHITE, 0x000F);
-    drawButton(140, 10, 90, 35, "STERGE", ILI9341_BLACK, ILI9341_RED);
+    drawButton(10, 10, 90, 35, "INAPOI", HAL_COLOR_WHITE, 0x000F);
+    drawButton(140, 10, 90, 35, "STERGE", HAL_COLOR_BLACK, HAL_COLOR_RED);
 
     lastValid = false;
 }
 
 void renderPageRgb() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillRect(0, 0, 240, 107, ILI9341_RED);
-    display.fillRect(0, 107, 240, 106, ILI9341_GREEN);
-    display.fillRect(0, 213, 240, 107, ILI9341_BLUE);
+    display.fillRect(0, 0, TFT_W, 107, HAL_COLOR_RED);
+    display.fillRect(0, 107, TFT_W, 106, HAL_COLOR_GREEN);
+    display.fillRect(0, 213, TFT_W, 107, HAL_COLOR_BLUE);
 
     display.setTextSize(2);
-    display.setTextColor(ILI9341_WHITE);
+    display.setTextColor(HAL_COLOR_WHITE);
 
     display.setCursor(95, 45);
     display.print("RED");
@@ -300,65 +296,65 @@ void renderPageRgb() {
     display.setCursor(90, 257);
     display.print("BLUE");
 
-    display.fillRect(10, 10, 80, 30, ILI9341_BLACK);
-    display.drawRect(10, 10, 80, 30, ILI9341_WHITE);
+    display.fillRect(10, 10, 80, 30, HAL_COLOR_BLACK);
+    display.drawRect(10, 10, 80, 30, HAL_COLOR_WHITE);
 
     display.setCursor(18, 17);
     display.print("INAPOI");
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 }
 
 void renderPageRaw() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
-    display.drawFastHLine(0, 215, 240, ILI9341_DARKGREY);
+    display.fillScreen(HAL_COLOR_BLACK);
+    display.drawFastHLine(0, 215, TFT_W, HAL_COLOR_DARKGREY);
 
     display.setTextSize(1);
-    display.setTextColor(ILI9341_WHITE);
+    display.setTextColor(HAL_COLOR_WHITE);
 
-    display.drawCircle(26, 235, 4, ILI9341_CYAN);
+    display.drawCircle(26, 235, 4, HAL_COLOR_CYAN);
     display.setCursor(35, 232);
     display.print("T1(26,235)");
 
-    display.drawCircle(150, 235, 4, ILI9341_CYAN);
+    display.drawCircle(150, 235, 4, HAL_COLOR_CYAN);
     display.setCursor(160, 232);
     display.print("T2(150,235)");
 
-    display.drawCircle(148, 273, 4, ILI9341_CYAN);
+    display.drawCircle(148, 273, 4, HAL_COLOR_CYAN);
     display.setCursor(158, 270);
     display.print("T3(148,273)");
 
-    display.drawCircle(27, 272, 4, ILI9341_CYAN);
+    display.drawCircle(27, 272, 4, HAL_COLOR_CYAN);
     display.setCursor(37, 269);
     display.print("T4(27,272)");
 
     display.setCursor(90, 48);
-    display.setTextColor(ILI9341_YELLOW);
+    display.setTextColor(HAL_COLOR_YELLOW);
     display.print("LIVE");
 
     display.setCursor(160, 48);
-    display.setTextColor(ILI9341_ORANGE);
+    display.setTextColor(HAL_COLOR_ORANGE);
     display.print("LAST");
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 
-    drawButton(10, 10, 220, 32, "INAPOI", ILI9341_WHITE, 0x000F);
+    drawButton(10, 10, 220, 32, "INAPOI", HAL_COLOR_WHITE, 0x000F);
 }
 
 void renderPageOrientX() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
+    display.fillScreen(HAL_COLOR_BLACK);
 
     display.setCursor(10, 12);
-    display.setTextColor(ILI9341_CYAN);
+    display.setTextColor(HAL_COLOR_CYAN);
     display.setTextSize(2);
     display.println("LINIA 1/2: ORIZONTALA");
 
     display.setTextSize(1);
-    display.setTextColor(ILI9341_WHITE);
+    display.setTextColor(HAL_COLOR_WHITE);
 
     display.setCursor(10, 45);
     display.println("Trageti o linie dreapta continuu");
@@ -367,31 +363,31 @@ void renderPageOrientX() {
     display.println("de la STANGA la DREAPTA pe ecran.");
 
     display.setTextSize(2);
-    display.setTextColor(ILI9341_YELLOW);
+    display.setTextColor(HAL_COLOR_YELLOW);
 
     // Săgeată orizontală (dublu contur pentru a părea mai groasă)
-    display.drawLine(40,  150, 180, 150, ILI9341_YELLOW);
-    display.drawLine(40,  151, 180, 151, ILI9341_YELLOW);
-    display.drawLine(160, 130, 180, 151, ILI9341_YELLOW);
-    display.drawLine(160, 131, 180, 152, ILI9341_YELLOW);
-    display.drawLine(160, 171, 180, 151, ILI9341_YELLOW);
-    display.drawLine(160, 170, 180, 150, ILI9341_YELLOW);
+    display.drawLine(40,  150, 180, 150, HAL_COLOR_YELLOW);
+    display.drawLine(40,  151, 180, 151, HAL_COLOR_YELLOW);
+    display.drawLine(160, 130, 180, 151, HAL_COLOR_YELLOW);
+    display.drawLine(160, 131, 180, 152, HAL_COLOR_YELLOW);
+    display.drawLine(160, 171, 180, 151, HAL_COLOR_YELLOW);
+    display.drawLine(160, 170, 180, 150, HAL_COLOR_YELLOW);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 }
 
 void renderPageOrientY() {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
+    display.fillScreen(HAL_COLOR_BLACK);
 
     display.setCursor(10, 12);
-    display.setTextColor(ILI9341_CYAN);
+    display.setTextColor(HAL_COLOR_CYAN);
     display.setTextSize(2);
     display.println("LINIA 2/2: VERTICALA");
 
     display.setTextSize(1);
-    display.setTextColor(ILI9341_WHITE);
+    display.setTextColor(HAL_COLOR_WHITE);
 
     display.setCursor(10, 45);
     display.println("Trageti o linie dreapta continuu");
@@ -400,38 +396,38 @@ void renderPageOrientY() {
     display.println("de SUS in JOS pe ecran.");
 
     // Săgeată verticală (dublu contur pentru a părea mai groasă)
-    display.drawLine(120, 100, 120, 220, ILI9341_YELLOW);
-    display.drawLine(121, 100, 121, 220, ILI9341_YELLOW);
-    display.drawLine(100, 200, 120, 220, ILI9341_YELLOW);
-    display.drawLine(101, 200, 121, 220, ILI9341_YELLOW);
-    display.drawLine(140, 200, 120, 220, ILI9341_YELLOW);
-    display.drawLine(139, 200, 119, 220, ILI9341_YELLOW);
+    display.drawLine(120, 100, 120, 220, HAL_COLOR_YELLOW);
+    display.drawLine(121, 100, 121, 220, HAL_COLOR_YELLOW);
+    display.drawLine(100, 200, 120, 220, HAL_COLOR_YELLOW);
+    display.drawLine(101, 200, 121, 220, HAL_COLOR_YELLOW);
+    display.drawLine(140, 200, 120, 220, HAL_COLOR_YELLOW);
+    display.drawLine(139, 200, 119, 220, HAL_COLOR_YELLOW);
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 }
 
 void renderCalibPointScreen(int idx) {
-    digitalWrite(TFT_CS, LOW);
+    halDisplaySelect();
 
-    display.fillScreen(ILI9341_BLACK);
+    display.fillScreen(HAL_COLOR_BLACK);
 
     display.setCursor(10, 10);
-    display.setTextColor(ILI9341_CYAN);
+    display.setTextColor(HAL_COLOR_CYAN);
     display.setTextSize(2);
     display.print("PAS 2: COORDONATE ");
     display.print(idx + 1);
     display.println("/4");
 
-    digitalWrite(TFT_CS, HIGH);
+    halDisplayDeselect();
 
     const int TX[] = {25, 215, 215, 25};
     const int TY[] = {85, 85, 300, 300};
 
     for (int i = 0; i < idx; i++) {
-        drawCrosshair(TX[i], TY[i], ILI9341_DARKGREY);
+        drawCrosshair(TX[i], TY[i], HAL_COLOR_DARKGREY);
     }
 
-    drawCrosshair(TX[idx], TY[idx], ILI9341_YELLOW);
+    drawCrosshair(TX[idx], TY[idx], HAL_COLOR_YELLOW);
 }
 
 // ============================================================
@@ -444,36 +440,15 @@ void setup() {
 
     loadCalib();
 
-    pinMode(TFT_CS, OUTPUT);
-    digitalWrite(TFT_CS, HIGH);
-
-    pinMode(TOUCH_CS, OUTPUT);
-    digitalWrite(TOUCH_CS, HIGH);
-
-    pinMode(TFT_LED, OUTPUT);
-    digitalWrite(TFT_LED, HIGH);
-
-    SPI1.setTX(TFT_MOSI);
-    SPI1.setSCK(TFT_SCK);
-    SPI1.setRX(TFT_MISO);
-    SPI1.begin();
-
-    SPI1.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-    SPI1.endTransaction();
-
-    display.begin();
-    display.invertDisplay(INVERT_COLORS);
-    display.setRotation(0);
-
-    pinMode(TOUCH_IRQ, INPUT_PULLUP);
-    touch.begin(SPI1);
-    touch.setRotation(0);
+    // Init hardware prin HAL (pini, SPI1, display, touch)
+    halDisplayInit();
+    halTouchInit();
     delay(50);
 
     // CRITIC: Curățarea forțată (Flush) a bufferului tactil rezidual
     // înainte de a evalua stadiul
     for (int i = 0; i < 5; i++) {
-        getIsolatedTouchPoint();
+        halTouchRead();
         delay(20);
     }
 
@@ -497,8 +472,8 @@ void setup() {
 }
 
 void loop() {
-    TS_Point pt = getIsolatedTouchPoint();
-    bool pressed = (pt.z > Z_TOUCH_MIN);
+    HalTouchPoint pt = halTouchRead();
+    bool pressed = pt.pressed;
 
     // Poartă non-blocantă: după o acțiune, ignoră touch-ul până
     // când degetul este ridicat complet (debounce de 50 ms)
@@ -544,13 +519,13 @@ void loop() {
                 recalibPhase = 0;  // Eliberat înainte de 2 s
             }
             else if (millis() - recalibStart >= 2000) {
-                digitalWrite(TFT_CS, LOW);
-                display.fillScreen(ILI9341_MAROON);
+                halDisplaySelect();
+                display.fillScreen(HAL_COLOR_MAROON);
                 display.setCursor(15, 120);
                 display.setTextSize(2);
-                display.setTextColor(ILI9341_WHITE);
+                display.setTextColor(HAL_COLOR_WHITE);
                 display.print("ELIBERATI BUTONUL...");
-                digitalWrite(TFT_CS, HIGH);
+                halDisplayDeselect();
                 recalibPhase = 2;
             }
         }
@@ -571,26 +546,26 @@ void loop() {
             static int lastInfoY = -1;
 
             if (pixelX != lastInfoX || pixelY != lastInfoY) {
-                digitalWrite(TFT_CS, LOW);
+                halDisplaySelect();
 
-                display.fillRect(0, 285, 240, 35, ILI9341_BLACK);
+                display.fillRect(0, 285, TFT_W, 35, HAL_COLOR_BLACK);
 
                 display.setCursor(5, 290);
                 display.setTextSize(1);
-                display.setTextColor(ILI9341_CYAN);
+                display.setTextColor(HAL_COLOR_CYAN);
                 display.print("RAW X: ");
                 display.print(pressed ? pt.x : 0);
                 display.print(" Y: ");
                 display.print(pressed ? pt.y : 0);
 
                 display.setCursor(5, 305);
-                display.setTextColor(ILI9341_GREEN);
+                display.setTextColor(HAL_COLOR_GREEN);
                 display.print("MAP X: ");
                 display.print(pressed ? pixelX : 0);
                 display.print(" Y: ");
                 display.print(pressed ? pixelY : 0);
 
-                digitalWrite(TFT_CS, HIGH);
+                halDisplayDeselect();
 
                 lastInfoX = pixelX;
                 lastInfoY = pixelY;
@@ -631,16 +606,16 @@ void loop() {
                     awaitingRelease = true;
                 }
                 else if (pixelY > 60 && pixelY < 292) {
-                    digitalWrite(TFT_CS, LOW);
+                    halDisplaySelect();
 
                     if (lastValid) {
-                        display.drawLine(lastX, lastY, pixelX, pixelY, ILI9341_GREEN);
+                        display.drawLine(lastX, lastY, pixelX, pixelY, HAL_COLOR_GREEN);
                     }
                     else {
-                        display.fillRect(pixelX - 1, pixelY - 1, 3, 3, ILI9341_GREEN);
+                        display.fillRect(pixelX - 1, pixelY - 1, 3, 3, HAL_COLOR_GREEN);
                     }
 
-                    digitalWrite(TFT_CS, HIGH);
+                    halDisplayDeselect();
 
                     lastX = pixelX;
                     lastY = pixelY;
@@ -655,18 +630,18 @@ void loop() {
             static int pby = -1;
 
             if (pixelX != pbx || pixelY != pby) {
-                digitalWrite(TFT_CS, LOW);
+                halDisplaySelect();
 
-                display.fillRect(0, 295, 240, 25, ILI9341_BLACK);
+                display.fillRect(0, 295, TFT_W, 25, HAL_COLOR_BLACK);
                 display.setCursor(10, 300);
-                display.setTextColor(ILI9341_CYAN);
+                display.setTextColor(HAL_COLOR_CYAN);
                 display.setTextSize(1);
                 display.print("X: ");
                 display.print(pixelX);
                 display.print(" | Y: ");
                 display.print(pixelY);
 
-                digitalWrite(TFT_CS, HIGH);
+                halDisplayDeselect();
 
                 pbx = pixelX;
                 pby = pixelY;
@@ -688,6 +663,8 @@ void loop() {
                 lastRawY = pt.y;
                 lastRawZ = pt.z;
 
+                // NOTA: aici se folosesc in mod intentionat valorile brute
+                // default (nu calib.*) — vezi pct. 4 din analiza; neatins.
                 lastMapX = constrain(safeMap(pt.x, 3700, 370, 0, 239), 0, 239);
                 lastMapY = constrain(safeMap(pt.y, 300, 3700, 0, 319), 0, 319);
 
@@ -702,75 +679,75 @@ void loop() {
                 }
             }
 
-            digitalWrite(TFT_CS, LOW);
+            halDisplaySelect();
 
             display.setTextSize(2);
 
             display.setCursor(15, 60);
-            display.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_WHITE, HAL_COLOR_BLACK);
             display.print("X: ");
-            display.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_YELLOW, HAL_COLOR_BLACK);
             display.print(pressed ? pt.x : 0);
             display.print("    ");
             display.setCursor(140, 60);
-            display.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_ORANGE, HAL_COLOR_BLACK);
             display.print(lastRawX);
             display.print("    ");
 
             display.setCursor(15, 82);
-            display.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_WHITE, HAL_COLOR_BLACK);
             display.print("Y: ");
-            display.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_YELLOW, HAL_COLOR_BLACK);
             display.print(pressed ? pt.y : 0);
             display.print("    ");
             display.setCursor(140, 82);
-            display.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_ORANGE, HAL_COLOR_BLACK);
             display.print(lastRawY);
             display.print("    ");
 
             display.setCursor(15, 104);
-            display.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_WHITE, HAL_COLOR_BLACK);
             display.print("Z: ");
-            display.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_YELLOW, HAL_COLOR_BLACK);
             display.print(pressed ? pt.z : 0);
             display.print("    ");
             display.setCursor(140, 104);
-            display.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_ORANGE, HAL_COLOR_BLACK);
             display.print(lastRawZ);
             display.print("    ");
 
             display.setCursor(15, 135);
-            display.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_WHITE, HAL_COLOR_BLACK);
             display.print("MX:");
-            display.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_GREEN, HAL_COLOR_BLACK);
             display.print(pressed ? currentMapX : 0);
             display.print("    ");
             display.setCursor(140, 135);
-            display.setTextColor(ILI9341_DARKGREEN, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_DARKGREEN, HAL_COLOR_BLACK);
             display.print(lastMapX);
             display.print("    ");
 
             display.setCursor(15, 157);
-            display.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_WHITE, HAL_COLOR_BLACK);
             display.print("MY:");
-            display.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_GREEN, HAL_COLOR_BLACK);
             display.print(pressed ? currentMapY : 0);
             display.print("    ");
             display.setCursor(140, 157);
-            display.setTextColor(ILI9341_DARKGREEN, ILI9341_BLACK);
+            display.setTextColor(HAL_COLOR_DARKGREEN, HAL_COLOR_BLACK);
             display.print(lastMapY);
             display.print("    ");
 
             display.setTextSize(1);
             display.setCursor(15, 185);
             display.setTextColor(
-                digitalRead(TOUCH_IRQ) == LOW ? ILI9341_YELLOW : ILI9341_GREEN,
-                ILI9341_BLACK
+                halTouchIrqActive() ? HAL_COLOR_YELLOW : HAL_COLOR_GREEN,
+                HAL_COLOR_BLACK
             );
             display.print("PENIRQ HW Stare: ");
-            display.println(digitalRead(TOUCH_IRQ) == LOW ? "ATINS " : "REPAUS");
+            display.println(halTouchIrqActive() ? "ATINS " : "REPAUS");
 
-            digitalWrite(TFT_CS, HIGH);
+            halDisplayDeselect();
         }
     }
 
@@ -861,12 +838,12 @@ void loop() {
                 else if (millis() - calibIdleSince >= CALIB_POINT_TIMEOUT_MS) {
                     renderCalibPointScreen(calibPointIndex);
 
-                    digitalWrite(TFT_CS, LOW);
+                    halDisplaySelect();
                     display.setCursor(10, 250);
                     display.setTextSize(1);
-                    display.setTextColor(ILI9341_RED, ILI9341_BLACK);
+                    display.setTextColor(HAL_COLOR_RED, HAL_COLOR_BLACK);
                     display.print("Timeout! Atingeti din nou punctul. ");
-                    digitalWrite(TFT_CS, HIGH);
+                    halDisplayDeselect();
 
                     calibIdleSince = millis();
                 }
