@@ -3,7 +3,14 @@
 #include <EEPROM.h>
 #include <LcdConfig.h>   // HAL: selectare model + API comun
 
-// Culori generice RGB565 (independente de controller)
+// ══════════════════════════════════════════════════════════════════
+// [GHID PRELUARE] Vezi agent_prompt.md pentru extragerea modulului
+// LCD + touch + calibrare (cu buton de recalibrare pe GP29).
+// Sectiunile marcate [PRELUARE] se copiaza; cele cu [NU PRELUA]
+// sunt specifice testerului si raman in acest proiect.
+// ══════════════════════════════════════════════════════════════════
+
+// [PRELUARE] Culori generice RGB565 (independente de controller)
 #define HAL_COLOR_BLACK      0x0000
 #define HAL_COLOR_WHITE      0xFFFF
 #define HAL_COLOR_RED        0xF800
@@ -23,6 +30,9 @@
 // ============================================================
 // Prototipuri de funcții
 // ============================================================
+// [PRELUARE] prototipurile pentru calibrare: safeMap, loadCalib,
+// saveCalib, forceReboot, processRawTouch, mapTouch, drawCrosshair,
+// renderPageOrientX, renderPageOrientY, renderCalibPointScreen
 int safeMap(int v, int fl, int fh, int tl, int th);
 void loadCalib();
 bool saveCalib();
@@ -44,8 +54,11 @@ void renderCalibPointScreen(int idx);
 // ============================================================
 // Pinii display/touch sunt acum in HAL (LcdModel*.cpp, structura LCD)
 
+// [PRELUARE-DAR-MODIFICA] In proiectul tinta butonul de recalibrare
+// este pe GP29 (aici e GP5 pentru tester)
 #define RECALIB_BUTTON 5
 
+// [PRELUARE] Praguri touch si constante de calibrare
 #define Z_TOUCH_MIN   (LCD.zTouchMin)
 #define Z_SAMPLE_MIN  (LCD.zSampleMin)
 
@@ -57,6 +70,7 @@ void renderCalibPointScreen(int idx);
 // ============================================================
 // Structuri de date și variabile globale
 // ============================================================
+// [PRELUARE] Structura de calibrare persistata in EEPROM
 // Structură impachetată: layout determinist în EEPROM, fără padding
 struct __attribute__((packed)) CalibData {
     uint32_t magic;
@@ -67,6 +81,11 @@ struct __attribute__((packed)) CalibData {
 
 CalibData calib;
 
+// [PRELUARE] Mașina de stări a calibrării: stage 1=orientare X,
+// 4=orientare Y, 2=4 puncte, 3=calibrat complet.
+// In proiectul tinta poti elimina enum-ul Page si paginile de
+// tester (INFO/DESEN/RGB/RAW) — pastreaza doar PAGE_ORIENT_X,
+// PAGE_ORIENT_Y, PAGE_CALIB plus pagina principala a aplicatiei.
 enum Page {
     PAGE_INFO,
     PAGE_DESEN,
@@ -79,9 +98,11 @@ enum Page {
 
 Page currentPage = PAGE_INFO;
 
+// [PRELUARE] Stare calibrare 4 puncte
 int calibPointIndex = 0;
 int32_t calibX[4], calibY[4];  // Coordonatele celor 4 colțuri de calibrare
 
+// [NU PRELUA] Variabile pentru paginile testerului (RAW/DESEN)
 int32_t lastRawX = 0;
 int32_t lastRawY = 0;
 int32_t lastRawZ = 0;
@@ -93,21 +114,21 @@ int lastX = -1;
 int lastY = -1;
 bool lastValid = false;
 
-// Poartă non-blocantă: ignoră touch-ul până la eliberarea completă
+// [PRELUARE] Poartă non-blocantă: ignoră touch-ul până la eliberarea completă
 bool awaitingRelease = false;
 unsigned long releaseSince = 0;
 
-// Stare non-blocantă pentru colectarea eșantioanelor de calibrare
+// [PRELUARE] Stare non-blocantă pentru colectarea eșantioanelor de calibrare
 enum CollectState { COLLECT_IDLE, COLLECT_SAMPLING };
 CollectState collectState = COLLECT_IDLE;
 int32_t calibSamplesX[12], calibSamplesY[12];
 int sampleCount = 0;
 
-// Timeout pentru așteptarea atingerii unui punct de calibrare
+// [PRELUARE] Timeout pentru așteptarea atingerii unui punct de calibrare
 unsigned long calibIdleSince = 0;
 const unsigned long CALIB_POINT_TIMEOUT_MS = 10000;
 
-// Eșantioane pentru detecția direcției de swipe (etapele de orientare):
+// [PRELUARE] Eșantioane pentru detecția direcției de swipe (etapele de orientare):
 // primele 2 și ultimele 2 eșantioane ale întregii mișcări
 int32_t swipeStartX[2], swipeStartY[2];
 int32_t swipeEndX[2], swipeEndY[2];
@@ -117,6 +138,8 @@ int swipeCount = 0;
 
 // ============================================================
 // Funcții de bază pentru touch și mapare
+// [PRELUARE] Toate funcțiile din această secțiune: safeMap,
+// loadCalib, saveCalib, forceReboot, processRawTouch, mapTouch
 // ============================================================
 int safeMap(int v, int fl, int fh, int tl, int th) {
     if (fh == fl) {
@@ -184,6 +207,7 @@ void mapTouch(int32_t rx, int32_t ry, int &ox, int &oy) {
 // ============================================================
 // Funcții de desenare
 // ============================================================
+// [NU PRELUA] drawButton — specifica UI-ului testerului
 void drawButton(int x, int y, int w, int h, const char *l, uint16_t fg, uint16_t bg) {
     halDisplaySelect();
 
@@ -198,6 +222,7 @@ void drawButton(int x, int y, int w, int h, const char *l, uint16_t fg, uint16_t
     halDisplayDeselect();
 }
 
+// [PRELUARE] drawCrosshair — folosita de ecranele de calibrare
 void drawCrosshair(int cx, int cy, uint16_t clr) {
     halDisplaySelect();
 
@@ -214,6 +239,7 @@ void drawCrosshair(int cx, int cy, uint16_t clr) {
 // ============================================================
 // Funcții de randare a paginilor
 // ============================================================
+// [NU PRELUA] renderPageInfo — pagina principala a testerului
 void renderPageInfo() {
     halDisplaySelect();
 
@@ -264,6 +290,8 @@ void renderPageInfo() {
     drawButton(125, 160, 105, 45, "Calibr.", HAL_COLOR_RED, HAL_COLOR_YELLOW);
 }
 
+// [NU PRELUA] renderPageDesen / renderPageRgb / renderPageRaw —
+// paginile de test ale testerului
 void renderPageDesen() {
     halDisplaySelect();
 
@@ -343,6 +371,10 @@ void renderPageRaw() {
     drawButton(10, 10, 220, 32, "INAPOI", HAL_COLOR_WHITE, 0x000F);
 }
 
+// [PRELUARE] renderPageOrientX / renderPageOrientY / renderCalibPointScreen —
+// ecranele procedurii de calibrare (pot fi restilizate in tinta,
+// dar pastreaza pozitiile crosshair-urilor: 25/215 X, 85/300 Y,
+// deoarece formula de extrapolare depinde de ele)
 void renderPageOrientX() {
     halDisplaySelect();
 
@@ -436,22 +468,27 @@ void renderCalibPointScreen(int idx) {
 void setup() {
     Serial.begin(115200);
 
+    // [PRELUARE] Buton recalibrare (in tinta: GP29, INPUT_PULLUP)
     pinMode(RECALIB_BUTTON, INPUT_PULLUP);
 
+    // [PRELUARE] Incarcare calibrare din EEPROM
     loadCalib();
 
-    // Init hardware prin HAL (pini, SPI1, display, touch)
+    // [PRELUARE] Init hardware prin HAL (pini, SPI1, display, touch)
     halDisplayInit();
     halTouchInit();
     delay(50);
 
-    // CRITIC: Curățarea forțată (Flush) a bufferului tactil rezidual
-    // înainte de a evalua stadiul
+    // [PRELUARE] CRITIC: Curățarea forțată (Flush) a bufferului tactil
+    // rezidual înainte de a evalua stadiul — fara asta, la pornire
+    // pot aparea atingeri fantoma care declanseaza etape gresite
     for (int i = 0; i < 5; i++) {
         halTouchRead();
         delay(20);
     }
 
+    // [PRELUARE] Reluarea etapei de calibrare dupa reboot
+    // (procedura trece prin reboot-uri intre etape)
     if (calib.stage == 1) {
         currentPage = PAGE_ORIENT_X;
         renderPageOrientX();
@@ -466,17 +503,19 @@ void setup() {
         renderCalibPointScreen(0);
     }
     else {
+        // [NU PRELUA] In tinta: randeaza pagina principala a aplicatiei
         currentPage = PAGE_INFO;
         renderPageInfo();
     }
 }
 
 void loop() {
+    // [PRELUARE] Citire touch prin HAL (izolare CS inclusa)
     HalTouchPoint pt = halTouchRead();
     bool pressed = pt.pressed;
 
-    // Poartă non-blocantă: după o acțiune, ignoră touch-ul până
-    // când degetul este ridicat complet (debounce de 50 ms)
+    // [PRELUARE] Poartă non-blocantă: după o acțiune, ignoră touch-ul
+    // până când degetul este ridicat complet (debounce de 50 ms)
     if (awaitingRelease) {
         if (pressed) {
             releaseSince = 0;
@@ -498,12 +537,17 @@ void loop() {
     int pixelX = 0;
     int pixelY = 0;
 
+    // [PRELUARE] Maparea coordonatelor touch in pixeli (doar cand
+    // calibrarea este completa, stage 3)
     if (pressed && calib.stage == 3) {
         mapTouch(pt.x, pt.y, pixelX, pixelY);
     }
 
     // =========================================================
-    // Buton hardware de recalibrare
+    // [PRELUARE] Buton hardware de recalibrare (in tinta: GP29)
+    // Tinut apasat 2 s -> sterge calibrarea -> stage 1 -> reboot.
+    // In tinta poti elimina mesajul grafic de pe ecran daca UI-ul
+    // aplicatiei nu permite, dar pastreaza logica de 2 s.
     // =========================================================
     if (calib.stage == 3) {
         static uint8_t recalibPhase = 0;  // 0=repaus, 1=cronometrare, 2=așteaptă eliberarea
@@ -539,6 +583,10 @@ void loop() {
 
     // =========================================================
     // Modul normal de funcționare (calibrare completă)
+    // [NU PRELUA] Intregul bloc if (calib.stage == 3) { ... }
+    // de mai jos contine paginile testerului (INFO/DESEN/RGB/RAW).
+    // In tinta, aici vine logica aplicatiei tale, folosind
+    // mapTouch() pentru coordonatele atingerilor.
     // =========================================================
     if (calib.stage == 3) {
         if (currentPage == PAGE_INFO) {
@@ -753,6 +801,9 @@ void loop() {
 
     // =========================================================
     // Etapele de calibrare
+    // [PRELUARE] Intregul bloc de mai jos (stage 1, 4 si 2):
+    // detectia orientarii axelor prin swipe + calibrarea in 4 puncte
+    // cu medie de esantioane si extrapolare la margini.
     // =========================================================
     else if (calib.stage == 1 && currentPage == PAGE_ORIENT_X) {
         if (pressed) {
