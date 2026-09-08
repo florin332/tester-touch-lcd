@@ -15,8 +15,6 @@ bool saveCalib();
 void forceReboot();
 void processRawTouch(int32_t rx, int32_t ry, int32_t &cx, int32_t &cy, bool useConfig);
 void mapTouch(int32_t rx, int32_t ry, int &ox, int &oy);
-void waitForRelease();
-bool collectCalibPoint(int32_t &ox, int32_t &oy, bool useConfig);
 void drawButton(int x, int y, int w, int h, const char *l, uint16_t fg, uint16_t bg);
 void drawCrosshair(int cx, int cy, uint16_t clr);
 void renderPageInfo();
@@ -55,7 +53,8 @@ void renderCalibPointScreen(int idx);
 // ============================================================
 // Structuri de date și variabile globale
 // ============================================================
-struct CalibData {
+// Structură impachetată: layout determinist în EEPROM, fără padding
+struct __attribute__((packed)) CalibData {
     uint32_t magic;
     uint16_t version;
     int32_t xmin, xmax, ymin, ymax;
@@ -76,15 +75,6 @@ enum Page {
 
 Page currentPage = PAGE_INFO;
 
-enum CalibState {
-    CAL_ST,
-    CAL_DR,
-    CAL_DJ,
-    CAL_SJ
-};
-
-CalibState calibState = CAL_ST;
-
 int calibPointIndex = 0;
 int32_t calibX[4], calibY[4];  // Coordonatele celor 4 colțuri de calibrare
 
@@ -99,7 +89,25 @@ int lastX = -1;
 int lastY = -1;
 bool lastValid = false;
 
-bool armRecalib = false;
+// Poartă non-blocantă: ignoră touch-ul până la eliberarea completă
+bool awaitingRelease = false;
+unsigned long releaseSince = 0;
+
+// Stare non-blocantă pentru colectarea eșantioanelor de calibrare
+enum CollectState { COLLECT_IDLE, COLLECT_SAMPLING };
+CollectState collectState = COLLECT_IDLE;
+int32_t calibSamplesX[12], calibSamplesY[12];
+int sampleCount = 0;
+
+// Timeout pentru așteptarea atingerii unui punct de calibrare
+unsigned long calibIdleSince = 0;
+const unsigned long CALIB_POINT_TIMEOUT_MS = 10000;
+
+// Eșantioane pentru detecția direcției de swipe (etapele de orientare):
+// primele 2 și ultimele 2 eșantioane ale întregii mișcări
+int32_t swipeStartX[2], swipeStartY[2];
+int32_t swipeEndX[2], swipeEndY[2];
+int swipeCount = 0;
 
 Adafruit_ILI9341 display(&SPI1, (int8_t)TFT_DC, (int8_t)TFT_CS, (int8_t)TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
@@ -118,6 +126,9 @@ TS_Point getIsolatedTouchPoint() {
 }
 
 int safeMap(int v, int fl, int fh, int tl, int th) {
+    if (fh == fl) {
+        return tl;  // Protecție la diviziune cu zero (calibrare coruptă)
+    }
     return tl + (v - fl) * (th - tl) / (fh - fl);
 }
 
@@ -175,55 +186,6 @@ void mapTouch(int32_t rx, int32_t ry, int &ox, int &oy) {
 
     ox = constrain(safeMap(cx, calib.xmin, calib.xmax, 0, 239), 0, 239);
     oy = constrain(safeMap(cy, calib.ymin, calib.ymax, 0, 319), 0, 319);
-}
-
-void waitForRelease() {
-    while (getIsolatedTouchPoint().z > Z_TOUCH_MIN) {
-        delay(10);
-    }
-    delay(50);
-}
-
-bool collectCalibPoint(int32_t &ox, int32_t &oy, bool useConfig) {
-    unsigned long timeout = millis() + 10000;
-    TS_Point p;
-
-    do {
-        p = getIsolatedTouchPoint();
-        if (millis() > timeout) {
-            return false;
-        }
-        delay(10);
-    } while (p.z < Z_SAMPLE_MIN);
-
-    int32_t xs[12], ys[12];
-    int n = 0;
-
-    while (n < 12) {
-        p = getIsolatedTouchPoint();
-        if (p.z < Z_SAMPLE_MIN) {
-            break;
-        }
-        xs[n] = p.x;
-        ys[n] = p.y;
-        n++;
-        delay(25);
-    }
-
-    if (n < 5) {
-        return false;
-    }
-
-    int32_t sumX = 0;
-    int32_t sumY = 0;
-    for (int i = 2; i < n - 2; i++) {
-        sumX += xs[i];
-        sumY += ys[i];
-    }
-
-    processRawTouch(sumX / (n - 4), sumY / (n - 4), ox, oy, useConfig);
-    waitForRelease();
-    return true;
 }
 
 // ============================================================
@@ -525,7 +487,6 @@ void setup() {
     }
     else if (calib.stage == 2) {
         currentPage = PAGE_CALIB;
-        calibState = CAL_ST;
         calibPointIndex = 0;
         renderCalibPointScreen(0);
     }
@@ -539,6 +500,26 @@ void loop() {
     TS_Point pt = getIsolatedTouchPoint();
     bool pressed = (pt.z > Z_TOUCH_MIN);
 
+    // Poartă non-blocantă: după o acțiune, ignoră touch-ul până
+    // când degetul este ridicat complet (debounce de 50 ms)
+    if (awaitingRelease) {
+        if (pressed) {
+            releaseSince = 0;
+        }
+        else if (releaseSince == 0) {
+            releaseSince = millis();
+        }
+        else if (millis() - releaseSince >= 50) {
+            awaitingRelease = false;
+            releaseSince = 0;
+        }
+
+        if (awaitingRelease) {
+            delay(10);
+            return;
+        }
+    }
+
     int pixelX = 0;
     int pixelY = 0;
 
@@ -549,32 +530,31 @@ void loop() {
     // =========================================================
     // Buton hardware de recalibrare
     // =========================================================
-    if (calib.stage == 3 && digitalRead(RECALIB_BUTTON) == LOW) {
-        unsigned long pressStart = millis();
-        bool validHold = true;
+    if (calib.stage == 3) {
+        static uint8_t recalibPhase = 0;  // 0=repaus, 1=cronometrare, 2=așteaptă eliberarea
+        static unsigned long recalibStart = 0;
+        bool btnLow = (digitalRead(RECALIB_BUTTON) == LOW);
 
-        while (millis() - pressStart < 2000) {
-            if (digitalRead(RECALIB_BUTTON) == HIGH) {
-                validHold = false;
-                break;
-            }
-            delay(20);
+        if (recalibPhase == 0 && btnLow) {
+            recalibPhase = 1;
+            recalibStart = millis();
         }
-
-        if (validHold) {
-            digitalWrite(TFT_CS, LOW);
-            display.fillScreen(ILI9341_MAROON);
-            display.setCursor(15, 120);
-            display.setTextSize(2);
-            display.setTextColor(ILI9341_WHITE);
-            display.print("ELIBERATI BUTONUL...");
-            digitalWrite(TFT_CS, HIGH);
-
-            while (digitalRead(RECALIB_BUTTON) == LOW) {
-                delay(10);
+        else if (recalibPhase == 1) {
+            if (!btnLow) {
+                recalibPhase = 0;  // Eliberat înainte de 2 s
             }
-
-            armRecalib = true;  // Armare sigură
+            else if (millis() - recalibStart >= 2000) {
+                digitalWrite(TFT_CS, LOW);
+                display.fillScreen(ILI9341_MAROON);
+                display.setCursor(15, 120);
+                display.setTextSize(2);
+                display.setTextColor(ILI9341_WHITE);
+                display.print("ELIBERATI BUTONUL...");
+                digitalWrite(TFT_CS, HIGH);
+                recalibPhase = 2;
+            }
+        }
+        else if (recalibPhase == 2 && !btnLow) {
             calib.magic = 0;
             calib.stage = 1;
             saveCalib();
@@ -618,22 +598,21 @@ void loop() {
 
             if (pressed) {
                 if (pixelX >= 10 && pixelX <= 115 && pixelY >= 100 && pixelY <= 145) {
-                    waitForRelease();
                     currentPage = PAGE_DESEN;
                     renderPageDesen();
+                    awaitingRelease = true;
                 }
                 else if (pixelX >= 125 && pixelX <= 230 && pixelY >= 100 && pixelY <= 145) {
-                    waitForRelease();
                     currentPage = PAGE_RGB;
                     renderPageRgb();
+                    awaitingRelease = true;
                 }
                 else if (pixelX >= 10 && pixelX <= 115 && pixelY >= 160 && pixelY <= 205) {
-                    waitForRelease();
                     currentPage = PAGE_RAW;
                     renderPageRaw();
+                    awaitingRelease = true;
                 }
                 else if (pixelX >= 125 && pixelX <= 230 && pixelY >= 160 && pixelY <= 205) {
-                    waitForRelease();
                     calib.stage = 2;
                     saveCalib();
                     forceReboot();
@@ -643,13 +622,13 @@ void loop() {
         else if (currentPage == PAGE_DESEN) {
             if (pressed) {
                 if (pixelX >= 10 && pixelX <= 100 && pixelY >= 10 && pixelY <= 45) {
-                    waitForRelease();
                     currentPage = PAGE_INFO;
                     renderPageInfo();
+                    awaitingRelease = true;
                 }
                 else if (pixelX >= 140 && pixelX <= 230 && pixelY >= 10 && pixelY <= 45) {
                     renderPageDesen();
-                    waitForRelease();
+                    awaitingRelease = true;
                 }
                 else if (pixelY > 60 && pixelY < 292) {
                     digitalWrite(TFT_CS, LOW);
@@ -695,9 +674,9 @@ void loop() {
         }
         else if (currentPage == PAGE_RGB) {
             if (pressed && pixelX >= 10 && pixelX <= 90 && pixelY >= 10 && pixelY <= 40) {
-                waitForRelease();
                 currentPage = PAGE_INFO;
                 renderPageInfo();
+                awaitingRelease = true;
             }
         }
         else if (currentPage == PAGE_RAW) {
@@ -716,9 +695,9 @@ void loop() {
                 currentMapY = lastMapY;
 
                 if (lastMapX >= 10 && lastMapX <= 230 && lastMapY >= 10 && lastMapY <= 42) {
-                    waitForRelease();
                     currentPage = PAGE_INFO;
                     renderPageInfo();
+                    awaitingRelease = true;
                     return;
                 }
             }
@@ -800,45 +779,120 @@ void loop() {
     // =========================================================
     else if (calib.stage == 1 && currentPage == PAGE_ORIENT_X) {
         if (pressed) {
-            TS_Point startPt = getIsolatedTouchPoint();
-            delay(350);
-            TS_Point endPt = getIsolatedTouchPoint();
+            // Reține primele 2 eșantioane ca punct de start
+            if (swipeCount < 2) {
+                swipeStartX[swipeCount] = pt.x;
+                swipeStartY[swipeCount] = pt.y;
+            }
+            // Actualizează în permanență ultimele 2 eșantioane
+            swipeEndX[0] = swipeEndX[1];
+            swipeEndX[1] = pt.x;
+            swipeEndY[0] = swipeEndY[1];
+            swipeEndY[1] = pt.y;
+            swipeCount++;
+        }
+        else if (swipeCount > 0) {
+            if (swipeCount >= 3) {
+                // Media ultimelor 2 vs. media primelor 2 = capetele traseului
+                long diffX = (long)((swipeEndX[0] + swipeEndX[1]) / 2)
+                           - (long)((swipeStartX[0] + swipeStartX[1]) / 2);
+                long diffY = (long)((swipeEndY[0] + swipeEndY[1]) / 2)
+                           - (long)((swipeStartY[0] + swipeStartY[1]) / 2);
 
-            long diffX = (long)endPt.x - (long)startPt.x;
-            long diffY = (long)endPt.y - (long)startPt.y;
+                calib.swapXY = (abs(diffX) > abs(diffY)) ? 0 : 1;
 
-            calib.swapXY = (abs(diffX) > abs(diffY)) ? 0 : 1;
+                long dominantX = calib.swapXY ? diffY : diffX;
+                calib.invX = (dominantX > 0) ? 0 : 1;
 
-            long dominantX = calib.swapXY ? diffY : diffX;
-            calib.invX = (dominantX > 0) ? 0 : 1;
-
-            calib.stage = 4;
-            saveCalib();
-            forceReboot();
+                calib.stage = 4;
+                saveCalib();
+                forceReboot();
+            }
+            // Prea puține eșantioane (atingere scurtă): ignoră și reia
+            swipeCount = 0;
         }
     }
     else if (calib.stage == 4 && currentPage == PAGE_ORIENT_Y) {
         if (pressed) {
-            TS_Point startPt = getIsolatedTouchPoint();
-            delay(350);
-            TS_Point endPt = getIsolatedTouchPoint();
+            // Reține primele 2 eșantioane ca punct de start
+            if (swipeCount < 2) {
+                swipeStartX[swipeCount] = pt.x;
+                swipeStartY[swipeCount] = pt.y;
+            }
+            // Actualizează în permanență ultimele 2 eșantioane
+            swipeEndX[0] = swipeEndX[1];
+            swipeEndX[1] = pt.x;
+            swipeEndY[0] = swipeEndY[1];
+            swipeEndY[1] = pt.y;
+            swipeCount++;
+        }
+        else if (swipeCount > 0) {
+            if (swipeCount >= 3) {
+                // Media ultimelor 2 vs. media primelor 2 = capetele traseului
+                long diffX = (long)((swipeEndX[0] + swipeEndX[1]) / 2)
+                           - (long)((swipeStartX[0] + swipeStartX[1]) / 2);
+                long diffY = (long)((swipeEndY[0] + swipeEndY[1]) / 2)
+                           - (long)((swipeStartY[0] + swipeStartY[1]) / 2);
 
-            long diffX = (long)endPt.x - (long)startPt.x;
-            long diffY = (long)endPt.y - (long)startPt.y;
+                long dominantY = calib.swapXY ? diffX : diffY;
+                calib.invY = (dominantY > 0) ? 0 : 1;
 
-            long dominantY = calib.swapXY ? diffX : diffY;
-            calib.invY = (dominantY > 0) ? 0 : 1;
-
-            calib.stage = 2;
-            saveCalib();
-            forceReboot();
+                calib.stage = 2;
+                saveCalib();
+                forceReboot();
+            }
+            // Prea puține eșantioane (atingere scurtă): ignoră și reia
+            swipeCount = 0;
         }
     }
     else if (calib.stage == 2 && currentPage == PAGE_CALIB) {
-        if (pressed) {
-            int32_t mx, my;
+        if (collectState == COLLECT_IDLE) {
+            if (pt.z >= Z_SAMPLE_MIN) {
+                // A început atingerea: pornește eșantionarea
+                collectState = COLLECT_SAMPLING;
+                sampleCount = 0;
+                calibIdleSince = 0;
+            }
+            else {
+                // Timeout la așteptarea atingerii: reafișează ecranul cu mesaj
+                if (calibIdleSince == 0) {
+                    calibIdleSince = millis();
+                }
+                else if (millis() - calibIdleSince >= CALIB_POINT_TIMEOUT_MS) {
+                    renderCalibPointScreen(calibPointIndex);
 
-            if (collectCalibPoint(mx, my, true)) {
+                    digitalWrite(TFT_CS, LOW);
+                    display.setCursor(10, 250);
+                    display.setTextSize(1);
+                    display.setTextColor(ILI9341_RED, ILI9341_BLACK);
+                    display.print("Timeout! Atingeti din nou punctul. ");
+                    digitalWrite(TFT_CS, HIGH);
+
+                    calibIdleSince = millis();
+                }
+            }
+        }
+        else if (pt.z >= Z_SAMPLE_MIN) {
+            // Colectează câte un eșantion pe iterația loop-ului (~10 ms)
+            if (sampleCount < 12) {
+                calibSamplesX[sampleCount] = pt.x;
+                calibSamplesY[sampleCount] = pt.y;
+                sampleCount++;
+            }
+        }
+        else {
+            // Degetul a fost ridicat: finalizează punctul curent
+            if (sampleCount >= 5) {
+                int32_t sumX = 0;
+                int32_t sumY = 0;
+                for (int i = 2; i < sampleCount - 2; i++) {
+                    sumX += calibSamplesX[i];
+                    sumY += calibSamplesY[i];
+                }
+
+                int32_t mx, my;
+                processRawTouch(sumX / (sampleCount - 4), sumY / (sampleCount - 4), mx, my, true);
+
                 calibX[calibPointIndex] = mx;
                 calibY[calibPointIndex] = my;
                 calibPointIndex++;
@@ -872,6 +926,7 @@ void loop() {
                     renderCalibPointScreen(calibPointIndex);
                 }
             }
+            collectState = COLLECT_IDLE;
         }
     }
 
